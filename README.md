@@ -38,4 +38,4 @@ Access the command center to inspect traffic and manage tunnels in real-time.
 - **Traffic Log:** Deep inspection of HTTP headers and request metadata.
 
 ---
-Built by Antigravity for the EmpireBot ecosystem.
+Built by Grit, Passion & Love.
