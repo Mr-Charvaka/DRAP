@@ -3,7 +3,7 @@ use drap_client::connection::ControlConnection;
 use drap_client::config::DrapConfig;
 use drap_client::display::{TerminalUi, TuiState};
 use clap::{Parser, Subcommand};
-use tracing::info;
+use tracing::{info, error};
 use directories::ProjectDirs;
 use std::fs;
 use std::path::PathBuf;
