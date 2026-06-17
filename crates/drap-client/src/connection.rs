@@ -12,6 +12,8 @@ use drap_protocol::{Frame, DRAP_MAGIC, PROTOCOL_VERSION};
 use drap_protocol::codec::DrapCodec;
 use tokio_util::codec::Framed;
 use futures::{StreamExt, SinkExt};
+use anyhow::{Context, Result};
+use bytes::Bytes;
 
 pub struct ControlConnection {
     connector: TlsConnector,
@@ -111,7 +113,7 @@ impl ControlConnection {
         self.framed = Some(framed);
         Ok(())
     }
-}
+
     pub async fn create_tunnel(&mut self, config: &crate::config::TunnelConfig) -> Result<()> {
         let framed = self.framed.as_mut().context("Not connected")?;
         
@@ -136,12 +138,13 @@ impl ControlConnection {
 
     pub async fn run(&mut self) -> Result<()> {
         let mut framed = self.framed.take().context("No active stream")?;
+        let (mut framed_writer, mut framed_reader) = framed.split();
         let (tx_queue_tx, mut tx_queue_rx) = mpsc::channel::<Frame>(1000);
 
         // --- 1. Central Writer Task ---
-        let writer_task = tokio::spawn(async move {
+        let _writer_task = tokio::spawn(async move {
             while let Some(frame) = tx_queue_rx.recv().await {
-                if framed.send(frame).await.is_err() { break; }
+                if framed_writer.send(frame).await.is_err() { break; }
             }
         });
 
@@ -170,7 +173,7 @@ impl ControlConnection {
                 }
 
                 // 2. Data from Tunnel -> Local App
-                res = framed.next() => {
+                res = framed_reader.next() => {
                     let frame = match res {
                         Some(Ok(f)) => f,
                         _ => break,
@@ -257,7 +260,6 @@ impl ControlConnection {
                     }
                 }
             }
-        }
 
         Ok(())
     }
@@ -278,6 +280,7 @@ impl ControlConnection {
             };
             let (mut local_read, mut local_write) = local_stream.into_split();
 
+            let to_tunnel_tx_write = to_tunnel_tx.clone();
             let write_task = tokio::spawn(async move {
                 let mut consumed_since_update = 0;
                 while let Some(data) = rx.recv().await {
@@ -287,21 +290,31 @@ impl ControlConnection {
                     consumed_since_update += len;
                     if consumed_since_update >= 32768 {
                         let update = Frame::new(FrameType::WindowUpdate, 0, stream_id, Bytes::from((consumed_since_update as u32).to_be_bytes().to_vec()));
-                        let _ = to_tunnel_tx.send((0, update.encode())).await; // Using StreamID 0 for control frames or a convention
+                        let _ = to_tunnel_tx_write.send((0, update.encode())).await; // Using StreamID 0 for control frames or a convention
                         consumed_since_update = 0;
                     }
                 }
             });
 
+            let to_tunnel_tx_read = to_tunnel_tx;
             let read_task = tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 while let Ok(n) = local_read.read(&mut buf).await {
                     if n == 0 { break; }
-                    let _ = to_tunnel_tx.send((stream_id, Bytes::copy_from_slice(&buf[..n]))).await;
+                    let _ = to_tunnel_tx_read.send((stream_id, Bytes::copy_from_slice(&buf[..n]))).await;
                 }
             });
 
-            let _ = tokio::join!(read_task, write_task);
+            let mut read_task = read_task;
+            let mut write_task = write_task;
+            tokio::select! {
+                _ = &mut read_task => {
+                    write_task.abort();
+                }
+                _ = &mut write_task => {
+                    read_task.abort();
+                }
+            }
             let _ = close_tx.send(stream_id).await;
         });
 
