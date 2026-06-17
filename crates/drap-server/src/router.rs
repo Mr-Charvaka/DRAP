@@ -1,4 +1,4 @@
-pub mod subdomain_gen;
+use crate::subdomain_gen;
 
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -39,7 +39,7 @@ pub struct Tunnel {
     pub active_streams_count: Arc<AtomicU32>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TunnelSnapshot {
     pub subdomain: String,
     pub bytes_sent: u64,
@@ -88,7 +88,7 @@ impl Router {
             base_domain: base_domain.to_string(),
             tunnels: DashMap::new(),
             db,
-            global_rate_limiter: SharedRateLimiter::new(50000, 1), // 50k req/sec
+            global_rate_limiter: SharedRateLimiter::new(50000.0, 1.0), // 50k req/sec
             broadcaster,
         }
     }
@@ -107,7 +107,7 @@ impl Router {
         client_os: String,
         client_version: String,
     ) -> Result<Arc<Tunnel>, String> {
-        let mut subdomain = requested_subdomain.unwrap_or_else(|| self.generate_subdomain()).to_lowercase();
+        let mut subdomain = requested_subdomain.clone().unwrap_or_else(|| self.generate_subdomain()).to_lowercase();
         
         let mut attempts = 0;
         while self.tunnels.contains_key(&subdomain) || RESERVED_SUBDOMAINS.contains(&subdomain.as_str()) {
@@ -140,7 +140,7 @@ impl Router {
             control_msg_tx: control_msg_tx.clone(),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_recv: Arc::new(AtomicU64::new(0)),
-            rate_limiter: SharedRateLimiter::new(100.0, 50.0),
+            rate_limiter: SharedRateLimiter::new(50000.0, 50000.0),
             allowed_ips,
             basic_auth,
             bearer_token,
