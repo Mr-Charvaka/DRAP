@@ -19,7 +19,7 @@ pub struct DataServer {
     ip_limiters: DashMap<std::net::IpAddr, SharedRateLimiter>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RequestMetadata {
     pub method: String,
     pub path: String,
@@ -74,22 +74,50 @@ impl DataServer {
         
         // --- Layer 2: Per-IP Rate Limit (Section 10.7.2) ---
         let limiter = ip_limiters.entry(peer_addr.ip()).or_insert_with(|| {
-            SharedRateLimiter::new(60.0, 30.0) // Default 60 req/min
+            SharedRateLimiter::new(50000.0, 50000.0) // Default 50k req/sec
         });
         if !limiter.check().await {
             let _ = stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\n\r\nIP rate limit exceeded.").await;
             return Ok(());
         }
         let mut buf = [0u8; 4096];
-        let n = stream.peek(&mut buf).await?;
-        if n == 0 { return Ok(()); }
+        let mut total_read = 0;
+        let mut header_len = None;
+
+        loop {
+            let n = stream.read(&mut buf[total_read..]).await?;
+            if n == 0 { break; }
+            total_read += n;
+
+            let mut headers = [httparse::EMPTY_HEADER; 64];
+            let mut req = httparse::Request::new(&mut headers);
+            match req.parse(&buf[..total_read]) {
+                Ok(httparse::Status::Complete(amt)) => {
+                    header_len = Some(amt);
+                    break;
+                }
+                Ok(httparse::Status::Partial) => {
+                    if total_read >= 4096 {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    break;
+                }
+            }
+        }
+
+        let amt = match header_len {
+            Some(len) => len,
+            None => return Ok(()),
+        };
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         
         let mut is_websocket = false;
-        let metadata = match req.parse(&buf[..n]) {
-            Ok(httparse::Status::Complete(_)) | Ok(httparse::Status::Partial) => {
+        let metadata = match req.parse(&buf[..amt]) {
+            Ok(httparse::Status::Complete(_)) => {
                 let method = req.method.unwrap_or("UNKNOWN").to_string();
                 let path = req.path.unwrap_or("/").to_string();
                 let mut host = String::new();
@@ -116,14 +144,14 @@ impl DataServer {
                 });
                 
                 let hex_snippet = if is_likely_binary {
-                    Some(buf[..n.min(16)].iter().map(|b| format!("{:02X}", b)).collect::<Vec<String>>().join(" "))
+                    Some(buf[..amt.min(16)].iter().map(|b| format!("{:02X}", b)).collect::<Vec<String>>().join(" "))
                 } else {
                     None
                 };
 
                 RequestMetadata { method, path, host, headers: captured_headers, hex_snippet }
             }
-            Err(_) => return Ok(()),
+            _ => return Ok(()),
         };
 
         // Extract subdomain from "sub.domain.com"
@@ -206,8 +234,8 @@ impl DataServer {
         }
 
         let inspector_req_id = uuid::Uuid::new_v4().to_string();
-        let raw_req_bytes = Bytes::copy_from_slice(&buf[..n]);
-        inspector.record_request(&tunnel.subdomain, metadata, Some(raw_req_bytes.clone()), None, inspector_req_id.clone()).await;
+        let raw_req_bytes = Bytes::copy_from_slice(&buf[..total_read]);
+        inspector.record_request(&tunnel.subdomain, metadata.clone(), Some(raw_req_bytes.clone()), None, inspector_req_id.clone()).await;
         let stream_id: u32 = rand::random();
         let (from_client_tx, mut from_client_rx) = mpsc::channel::<Bytes>(100);
         
@@ -224,7 +252,7 @@ impl DataServer {
         if is_websocket {
             info!("WebSocket upgrade detected for {}; bypassing header injection", subdomain);
             // Send entire original buffer as-is for WebSocket upgrades
-            let data = Bytes::copy_from_slice(&buf[..n]);
+            let data = Bytes::copy_from_slice(&buf[..total_read]);
             control_tx.send(ControlMessage::Data { stream_id, data }).await?;
         } else {
             let mut modified_headers = format!(
@@ -255,6 +283,12 @@ impl DataServer {
             // Send modified headers into the tunnel
             let header_bytes = Bytes::from(modified_headers);
             control_tx.send(ControlMessage::Data { stream_id, data: header_bytes }).await?;
+
+            // Forward any read body bytes
+            if total_read > amt {
+                let body_bytes = Bytes::copy_from_slice(&buf[amt..total_read]);
+                control_tx.send(ControlMessage::Data { stream_id, data: body_bytes }).await?;
+            }
         }
 
         // Forward the REMAINDER of the request (if we peeked only headers)
@@ -275,13 +309,34 @@ impl DataServer {
             let _ = control_tx.send(ControlMessage::CloseStream { stream_id }).await;
         });
 
+        let control_tx_update = tunnel.control_msg_tx.clone();
         let write_task = tokio::spawn(async move {
+            let mut consumed_since_update = 0;
             while let Some(data) = from_client_rx.recv().await {
+                let len = data.len();
                 if tcp_write.write_all(&data).await.is_err() { break; }
+                
+                consumed_since_update += len;
+                if consumed_since_update >= 32768 {
+                    let _ = control_tx_update.send(ControlMessage::WindowUpdate {
+                        stream_id,
+                        increment: consumed_since_update as u32,
+                    }).await;
+                    consumed_since_update = 0;
+                }
             }
         });
 
-        let _ = tokio::join!(read_task, write_task);
+        let mut read_task = read_task;
+        let mut write_task = write_task;
+        tokio::select! {
+            _ = &mut read_task => {
+                write_task.abort();
+            }
+            _ = &mut write_task => {
+                read_task.abort();
+            }
+        }
         let total_duration = start_time.elapsed().as_secs_f64() * 1000.0;
         
         let timing = crate::inspector::TimingBreakdown {
