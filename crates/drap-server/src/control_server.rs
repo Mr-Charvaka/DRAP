@@ -162,21 +162,21 @@ impl ControlServer {
         } else {
             format!("{}.{}", tunnel.subdomain, router.base_domain)
         };
-        stream.write_all(&Frame::new(FrameType::TunnelCreated, 0, 0, Bytes::from(public_url.clone())).encode()).await?;
+        framed.send(Frame::new(FrameType::TunnelCreated, 0, 0, Bytes::from(public_url.clone()))).await?;
         info!("Tunnel Established: {}", public_url);
 
         // Notify Dashboard
         router.broadcaster.broadcast(crate::dashboard::DashboardEvent::TunnelConnected(tunnel.snapshot()));
 
+        let (mut framed_writer, mut framed_reader) = framed.split();
         let (tx_queue_tx, mut tx_queue_rx) = mpsc::channel::<Frame>(1000);
-        let mut framed = framed;
         
         // --- 1. Central Writer Task (Ensures sequenced socket access) ---
         let tunnel_clone_for_writer = tunnel.clone();
-        let writer_task = tokio::spawn(async move {
+        let _writer_task = tokio::spawn(async move {
             while let Some(frame) = tx_queue_rx.recv().await {
                 let len = frame.header.length;
-                if framed.send(frame).await.is_err() { break; }
+                if framed_writer.send(frame).await.is_err() { break; }
                 tunnel_clone_for_writer.bytes_sent.fetch_add(len as u64, Ordering::Relaxed);
             }
         });
@@ -213,7 +213,7 @@ impl ControlServer {
                             let (worker_tx, mut worker_rx) = mpsc::channel::<Bytes>(100);
                             stream_worker_txs.insert(stream_id, worker_tx);
 
-                            let tx_queue_tx = tx_queue_tx.clone();
+                            let tx_queue_tx_clone = tx_queue_tx.clone();
                             tokio::spawn(async move {
                                 while let Some(data) = worker_rx.recv().await {
                                     let len = data.len() as u32;
@@ -221,7 +221,7 @@ impl ControlServer {
                                     let _ = sem.acquire_many(len).await;
                                     
                                     let frame = Frame::new(FrameType::Data, 0, stream_id, data);
-                                    if tx_queue_tx.send(frame).await.is_err() { break; }
+                                    if tx_queue_tx_clone.send(frame).await.is_err() { break; }
                                 }
                             });
 
@@ -256,6 +256,11 @@ impl ControlServer {
                             let frame = Frame::new(FrameType::UdpData, 0, 0, payload.freeze());
                             let _ = tx_queue_tx.send(frame).await;
                         }
+                        ControlMessage::WindowUpdate { stream_id, increment } => {
+                            let payload = Bytes::from(increment.to_be_bytes().to_vec());
+                            let frame = Frame::new(FrameType::WindowUpdate, 0, stream_id, payload);
+                            let _ = tx_queue_tx.send(frame).await;
+                        }
                         ControlMessage::GoAway { reason } => {
                             let frame = Frame::new(FrameType::GoAway, 0, 0, Bytes::from(reason));
                             let _ = tx_queue_tx.send(frame).await;
@@ -264,7 +269,7 @@ impl ControlServer {
                 }
 
                 // 2. Data from Client (External Tunnel)
-                res = framed.next() => {
+                res = framed_reader.next() => {
                     let frame = match res {
                         Some(Ok(f)) => f,
                         _ => {
@@ -321,8 +326,8 @@ impl ControlServer {
                     }
                 }
             }
-        }
- 
+
+
         info!("Removing tunnel: {}", tunnel.subdomain);
         router.broadcaster.broadcast(crate::dashboard::DashboardEvent::TunnelDisconnected(tunnel.subdomain.clone()));
         router.remove_tunnel(&tunnel.subdomain);
