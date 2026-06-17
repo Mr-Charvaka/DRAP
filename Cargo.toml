@@ -4,6 +4,7 @@ members = [
     "crates/drap-common",
     "crates/drap-client",
     "crates/drap-server",
+    "crates/drap-testing",
 ]
 resolver = "2"
 
