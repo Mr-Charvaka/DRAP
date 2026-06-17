@@ -41,6 +41,8 @@ pub enum ProtocolError {
     FrameTooLarge(u32),
     #[error("Insufficient data")]
     InsufficientData,
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 impl Frame {
