@@ -102,6 +102,11 @@ impl Database {
                 path,
                 host,
                 headers,
+                duration_ms: None,
+                timing: None,
+                is_binary: false,
+                hex_snippet: None,
+                raw_request: None,
             });
         }
 
