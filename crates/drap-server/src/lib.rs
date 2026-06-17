@@ -9,3 +9,5 @@ pub mod udp_server;
 pub mod tcp_server;
 pub mod error_pages;
 pub mod dashboard;
+pub mod subdomain_gen;
+
