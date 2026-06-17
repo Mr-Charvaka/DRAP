@@ -1,4 +1,5 @@
 use serde::Serialize;
+use bytes::Bytes;
 use std::sync::Arc;
 use crate::dashboard::{DashboardBroadcaster, DashboardEvent};
 use tokio::sync::RwLock;
@@ -8,7 +9,6 @@ use chrono::{DateTime, Utc};
 use crate::db::Database;
 
 #[derive(Debug, Clone, Serialize)]
-#[derive(Serialize, Clone)]
 pub struct TimingBreakdown {
     pub tls_handshake_ms: f64,
     pub routing_ms: f64,
@@ -16,6 +16,7 @@ pub struct TimingBreakdown {
     pub local_processing_ms: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub struct CapturedRequest {
     pub id: String,
     pub tunnel_id: String,
@@ -28,6 +29,7 @@ pub struct CapturedRequest {
     pub timing: Option<TimingBreakdown>,
     pub is_binary: bool,
     pub hex_snippet: Option<String>,
+    #[serde(skip)]
     pub raw_request: Option<Bytes>,
 }
 
