@@ -29,6 +29,8 @@ rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 mime_guess = "2"
 redis = { version = "0.25", features = ["tokio-comp"] }
 anyhow.workspace = true
+tower-http = { workspace = true }
+tokio-stream = "0.1"
 
 [[bin]]
 name = "drap-server"
