@@ -7,7 +7,7 @@ use axum::{
 use std::sync::Arc;
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
-use rust_embed::RustEmbed;
+use rust_embed::{RustEmbed, Embed};
 use axum::http::{header, StatusCode, HeaderValue};
 use tracing::{info, error};
 
@@ -16,7 +16,7 @@ use crate::inspector::{Inspector, CapturedRequest};
 use crate::dashboard::{DashboardBroadcaster, DashboardEvent};
 
 #[derive(RustEmbed)]
-#[folder = "dashboard/ui/build"]
+#[folder = "../../dashboard/ui/build"]
 struct Assets;
 
 #[derive(Serialize)]
@@ -144,38 +144,36 @@ async fn replay_request(
 ) -> impl IntoResponse {
     if let Some(req) = inspector.get_request_by_id(&id).await {
         if let Some(tunnel) = state.router.get_tunnel(&req.tunnel_id) {
-            let msg = ControlMessage::Replay {
-                method: req.method,
-                path: req.path,
-                headers: req.headers,
-            };
-            let _ = tunnel.control_msg_tx.send(msg).await;
-            return "OK";
+            if let Some(raw_request) = req.raw_request {
+                let msg = ControlMessage::Replay { raw_request };
+                let _ = tunnel.control_msg_tx.send(msg).await;
+                return "OK";
+            }
         }
     }
     "NOT_FOUND"
 }
 
 async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
-    let path = uri.path().trim_start_matches('/');
+    let path = uri.path().trim_start_matches('/').to_string();
 
     if path.is_empty() || path == "index.html" {
         return serve_asset("index.html");
     }
 
-    match serve_asset(path) {
+    match serve_asset(&path) {
         Ok(body) => Ok(body),
         Err(_) => serve_asset("index.html"), // SPA fallback
     }
 }
 
-fn serve_asset(path: &str) -> Result<impl IntoResponse, StatusCode> {
+fn serve_asset(path: &str) -> Result<axum::response::Response, StatusCode> {
     if let Some(content) = Assets::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         Ok((
             [(header::CONTENT_TYPE, HeaderValue::from_str(mime.as_ref()).unwrap())],
             content.data,
-        ))
+        ).into_response())
     } else {
         Err(StatusCode::NOT_FOUND)
     }
